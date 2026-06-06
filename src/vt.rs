@@ -199,17 +199,19 @@ mod tests {
     #[test]
     fn sixel_only_feed_marks_image_rows_dirty() {
         let mut vt = Vt::new(10, 3);
+        // Drain the fresh terminal's initial dirty state so the next feed
+        // reports only what that feed changed.
+        let _ = vt.feed_str("").lines;
         // A feed that is *only* a sixel DCS still changes the screen: the image
         // becomes visible at the cursor row. A renderer that repaints just the
         // returned changed rows must be told that row is dirty, or the image
         // stays invisible until some unrelated text update dirties the screen.
-        let changes = vt.feed_str(RED_SIXEL);
+        let dirty = vt.feed_str(RED_SIXEL).lines.clone();
 
         assert_eq!(vt.images().len(), 1);
         assert!(
-            changes.lines.contains(&0),
-            "expected the image's anchor row to be reported dirty, got {:?}",
-            changes.lines
+            dirty.contains(&0),
+            "expected the image's anchor row to be reported dirty, got {dirty:?}"
         );
     }
 

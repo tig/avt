@@ -17,6 +17,13 @@ use rgb::{RGB8, RGBA8};
 
 const TRANSPARENT: RGBA8 = RGBA8::new(0, 0, 0, 0);
 
+// Upper bound on a decoded image's pixel count. A malformed raster declaration
+// ("...;Ph;Pv) can claim an enormous canvas while sending almost no data; this
+// cap keeps untrusted terminal output from overflowing the width*height
+// multiply or trying to allocate a multi-gigabyte buffer. 16M px (~64 MiB of
+// RGBA8) is far larger than any legitimate terminal sixel.
+const MAX_PIXELS: usize = 16_000_000;
+
 /// A decoded sixel image: a row-major, tightly packed RGBA pixel buffer.
 #[derive(Debug, PartialEq)]
 pub struct Sixel {
@@ -246,7 +253,10 @@ impl Decoder {
             return None;
         }
 
-        let mut pixels = vec![TRANSPARENT; width * height];
+        // Reject canvases whose declared size overflows or exceeds the cap,
+        // rather than overflowing the multiply or attempting a huge allocation.
+        let area = width.checked_mul(height).filter(|&a| a <= MAX_PIXELS)?;
+        let mut pixels = vec![TRANSPARENT; area];
 
         for (y, row) in self.rows.iter().enumerate() {
             for (x, &px) in row.iter().enumerate() {

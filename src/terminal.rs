@@ -345,6 +345,13 @@ impl Terminal {
         if let Some(sixel) = crate::sixel::decode(&data) {
             let image = crate::sixel::Image::from_sixel(self.cursor.col, self.cursor.row, sixel);
             self.buffer.add_image(image);
+
+            // The image paints from the cursor row downward; without the
+            // renderer's cell pixel height we can't know its exact row span, so
+            // mark every row it could cover (anchor row to the bottom) dirty.
+            // Otherwise a feed containing only a sixel DCS reports no changed
+            // rows and renderers that repaint just those rows never show it.
+            self.dirty_lines.extend(self.cursor.row..self.rows);
         }
     }
 
