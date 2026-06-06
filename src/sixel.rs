@@ -407,4 +407,13 @@ mod tests {
     fn empty_data_is_none() {
         assert!(decode("").is_none());
     }
+
+    #[test]
+    fn oversized_raster_declaration_is_rejected() {
+        // A malformed raster declaration can claim an enormous canvas while
+        // sending almost no pixels. Allocating width * height pixels for it
+        // would overflow or OOM the process, so decode must bail instead.
+        let s = decode("\"1;1;999999999;999999999#0;2;100;0;0@");
+        assert!(s.is_none(), "expected oversized raster to be rejected");
+    }
 }

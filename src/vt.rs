@@ -197,6 +197,23 @@ mod tests {
     }
 
     #[test]
+    fn sixel_only_feed_marks_image_rows_dirty() {
+        let mut vt = Vt::new(10, 3);
+        // A feed that is *only* a sixel DCS still changes the screen: the image
+        // becomes visible at the cursor row. A renderer that repaints just the
+        // returned changed rows must be told that row is dirty, or the image
+        // stays invisible until some unrelated text update dirties the screen.
+        let changes = vt.feed_str(RED_SIXEL);
+
+        assert_eq!(vt.images().len(), 1);
+        assert!(
+            changes.lines.contains(&0),
+            "expected the image's anchor row to be reported dirty, got {:?}",
+            changes.lines
+        );
+    }
+
+    #[test]
     fn sixel_split_across_feeds_is_captured() {
         let mut vt = Vt::new(10, 3);
         vt.feed_str("\u{1b}Pq#0;2;100;0;0");
