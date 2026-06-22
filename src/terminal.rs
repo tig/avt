@@ -6,6 +6,7 @@ use self::dirty_lines::DirtyLines;
 use crate::buffer::{Buffer, EraseMode};
 use crate::cell::{Cell, Occupancy};
 use crate::charset::Charset;
+use crate::kitty::{self, Action};
 use crate::line::Line;
 use crate::parser::{
     AnsiMode, AnsiModes, CtcOp, DecMode, DecModes, EdScope, ElScope, Function, SgrOp, SgrOps,
@@ -41,6 +42,23 @@ pub struct Terminal {
     dirty_lines: DirtyLines,
     xtwinops: bool,
     cell_size: Option<(usize, usize)>,
+    // The Kitty graphics transfer currently being reassembled across `m=1`
+    // continuation chunks, or `None` between transfers.
+    kitty_transfer: Option<KittyTransfer>,
+}
+
+/// A Kitty graphics image being reassembled: the first chunk's header keys plus
+/// the base64 payload accumulated so far.
+#[derive(Debug)]
+struct KittyTransfer {
+    format: u32,
+    width: usize,
+    height: usize,
+    cols: usize,
+    rows: usize,
+    id: Option<u32>,
+    transmit_only: bool,
+    payload: String,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -125,6 +143,7 @@ impl Terminal {
             dirty_lines,
             xtwinops: false,
             cell_size,
+            kitty_transfer: None,
         }
     }
 
@@ -343,14 +362,22 @@ impl Terminal {
             Sixel(data) => {
                 self.sixel(data);
             }
+
+            KittyGraphics(cmd) => {
+                self.kitty_graphics(cmd);
+            }
         }
     }
 
     /// Decode a sixel DCS payload and anchor the image at the cursor cell.
     fn sixel(&mut self, data: String) {
         if let Some(sixel) = crate::sixel::decode(&data) {
-            let image =
-                crate::sixel::Image::from_sixel(self.cursor.col, self.cursor.row, sixel, self.cell_size);
+            let image = crate::sixel::Image::from_sixel(
+                self.cursor.col,
+                self.cursor.row,
+                sixel,
+                self.cell_size,
+            );
             self.buffer.add_image(image);
 
             // The image paints from the cursor row downward; without the
@@ -362,7 +389,116 @@ impl Terminal {
         }
     }
 
-    /// The sixel images currently placed in the active buffer.
+    /// Handle a Kitty graphics APC command (everything after the `G`
+    /// introducer). Deletes by id are applied immediately; transmissions are
+    /// reassembled across continuation chunks and placed at the cursor.
+    fn kitty_graphics(&mut self, cmd: String) {
+        let command = kitty::parse_command(&cmd);
+
+        match command.action {
+            Action::Delete => {
+                // Only delete-by-id (`d=i`/`d=I` with a non-zero id) is handled;
+                // other delete targets are ignored.
+                if matches!(command.delete_target, Some('i') | Some('I')) {
+                    if let Some(id) = command.id.filter(|&id| id != 0) {
+                        self.buffer.remove_images_by_id(id);
+                        self.dirty_lines.extend(0..self.rows);
+                    }
+                }
+            }
+
+            // Query and any other action we don't implement are ignored.
+            Action::Query | Action::Other | Action::Put => {}
+
+            // Transmit (`a=t`) and transmit-and-display (`a=T`), plus headerless
+            // continuation chunks, accumulate into a transfer.
+            Action::Transmit | Action::TransmitAndDisplay => {
+                self.kitty_accumulate(command);
+            }
+        }
+    }
+
+    /// Start or continue reassembling a Kitty graphics transfer, finalizing it
+    /// once the final chunk (`m=0`) arrives.
+    fn kitty_accumulate(&mut self, command: kitty::Command) {
+        match self.kitty_transfer.as_mut() {
+            // First chunk: record the header keys and start the payload.
+            None => {
+                self.kitty_transfer = Some(KittyTransfer {
+                    format: command.format,
+                    width: command.width,
+                    height: command.height,
+                    cols: command.cols,
+                    rows: command.rows,
+                    id: command.id,
+                    transmit_only: command.action == Action::Transmit,
+                    payload: command.payload,
+                });
+            }
+
+            // Continuation chunk: append its payload to the in-flight transfer.
+            Some(transfer) => {
+                transfer.payload.push_str(&command.payload);
+            }
+        }
+
+        if !command.more {
+            if let Some(transfer) = self.kitty_transfer.take() {
+                self.kitty_place(transfer);
+            }
+        }
+    }
+
+    /// Decode a finished transfer and anchor it at the cursor. Transmit-only
+    /// (`a=t`) transfers are stored-without-display, which we don't support, so
+    /// they are dropped here.
+    fn kitty_place(&mut self, transfer: KittyTransfer) {
+        if transfer.transmit_only {
+            return;
+        }
+
+        let Some(raster) = kitty::decode_raster(
+            transfer.format,
+            transfer.width,
+            transfer.height,
+            &transfer.payload,
+        ) else {
+            return;
+        };
+
+        // Prefer the explicit cell footprint (`c`/`r`); otherwise derive it from
+        // the renderer's cell pixel size, the same fallback sixel uses.
+        let (cols, rows) = if transfer.cols > 0 && transfer.rows > 0 {
+            (transfer.cols, transfer.rows)
+        } else {
+            match self.cell_size {
+                Some((cw, ch)) if cw > 0 && ch > 0 => {
+                    (raster.width.div_ceil(cw), raster.height.div_ceil(ch))
+                }
+                _ => (0, 0),
+            }
+        };
+
+        // A re-placement of the same id replaces its prior image.
+        if let Some(id) = transfer.id {
+            self.buffer.remove_images_by_id(id);
+        }
+
+        let image = crate::sixel::Image::from_raster(
+            self.cursor.col,
+            self.cursor.row,
+            raster,
+            cols,
+            rows,
+            transfer.id,
+        );
+
+        self.buffer.add_image(image);
+        self.dirty_lines.extend(self.cursor.row..self.rows);
+    }
+
+    /// The sixel and Kitty graphics images currently placed in the active
+    /// buffer.
     pub fn images(&self) -> &[crate::sixel::Image] {
         self.buffer.images()
     }
@@ -646,6 +782,7 @@ impl Terminal {
         self.saved_ctx = SavedCtx::default();
         self.alternate_saved_ctx = SavedCtx::default();
         self.dirty_lines = DirtyLines::new(self.rows);
+        self.kitty_transfer = None;
     }
 
     fn primary_buffer(&self) -> &Buffer {

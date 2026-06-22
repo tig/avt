@@ -50,6 +50,9 @@ pub struct Image {
     cols: usize,
     rows: usize,
     occluded: Vec<bool>,
+    /// The Kitty graphics image id, if this image came from the Kitty protocol.
+    /// Sixel images have no id.
+    id: Option<u32>,
 }
 
 impl Image {
@@ -68,22 +71,47 @@ impl Image {
             cols: 0,
             rows: 0,
             occluded: Vec::new(),
+            id: None,
         }
     }
 
-    pub(crate) fn from_sixel(col: usize, row: usize, sixel: Sixel, cell_size: Option<(usize, usize)>) -> Self {
+    /// Anchor a sixel raster at a cell, deriving its cell footprint from the
+    /// renderer's cell pixel size (when known). Sixel images carry no id.
+    pub(crate) fn from_sixel(
+        col: usize,
+        row: usize,
+        sixel: Sixel,
+        cell_size: Option<(usize, usize)>,
+    ) -> Self {
         let (cols, rows) = match cell_size {
-            Some((cw, ch)) if cw > 0 && ch > 0 => (sixel.width.div_ceil(cw), sixel.height.div_ceil(ch)),
+            Some((cw, ch)) if cw > 0 && ch > 0 => {
+                (sixel.width.div_ceil(cw), sixel.height.div_ceil(ch))
+            }
             _ => (0, 0),
         };
 
+        Self::from_raster(col, row, sixel, cols, rows, None)
+    }
+
+    /// Anchor a raster at a cell with an explicit `cols` x `rows` cell
+    /// footprint and an optional image `id` (Kitty graphics). A zero footprint
+    /// means the cell size is unknown and no occlusion is tracked.
+    pub(crate) fn from_raster(
+        col: usize,
+        row: usize,
+        raster: Sixel,
+        cols: usize,
+        rows: usize,
+        id: Option<u32>,
+    ) -> Self {
         Image {
             col,
             row,
-            data: Arc::new(sixel),
+            data: Arc::new(raster),
             cols,
             rows,
             occluded: vec![false; cols * rows],
+            id,
         }
     }
 
@@ -111,6 +139,11 @@ impl Image {
     /// The image's cell footprint height, or `0` if the cell size is unknown.
     pub fn rows(&self) -> usize {
         self.rows
+    }
+
+    /// The Kitty graphics image id, or `None` for a sixel image.
+    pub fn id(&self) -> Option<u32> {
+        self.id
     }
 
     /// Whether the footprint cell at offset (`dcol`, `drow`) from the anchor has

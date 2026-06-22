@@ -18,6 +18,13 @@ pub struct Parser {
     // Function::Sixel on the string terminator. Other DCS strings are ignored.
     dcs_capture: bool,
     dcs_data: String,
+    // APC capture: an APC string (ESC _ ... ST) carries the Kitty graphics
+    // protocol. When an APC is entered its printable bytes are accumulated here
+    // and, if they begin with `G`, emitted as a Function::KittyGraphics on the
+    // string terminator. SOS and PM strings share the same parser state but are
+    // not captured.
+    apc_capture: bool,
+    apc_data: String,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
@@ -92,6 +99,7 @@ pub enum Function {
     Vpr(u16),
     Xtwinops(XtwinopsOp),
     Sixel(String),
+    KittyGraphics(String),
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -433,11 +441,12 @@ impl Parser {
             }
 
             (_, '\u{1b}') => {
-                // ESC begins a 7-bit string terminator (ESC \), ending a DCS.
-                let sixel = self.unhook();
+                // ESC begins a 7-bit string terminator (ESC \), ending a DCS or
+                // APC string.
+                let captured = self.unhook();
                 self.state = Escape;
                 self.clear();
-                return sixel;
+                return captured;
             }
 
             (Escape, '\u{5b}') => {
@@ -515,11 +524,11 @@ impl Parser {
             | (_, '\u{91}'..='\u{97}')
             | (_, '\u{99}')
             | (_, '\u{9a}') => {
-                let sixel = self.unhook();
+                let captured = self.unhook();
                 self.state = Ground;
 
-                if sixel.is_some() {
-                    return sixel;
+                if captured.is_some() {
+                    return captured;
                 }
 
                 return self.execute(input);
@@ -585,19 +594,32 @@ impl Parser {
                 return self.execute(input);
             }
 
-            (Escape, '\u{58}') | (Escape, '\u{5e}') | (Escape, '\u{5f}') => {
+            // APC introducers (ESC _ and the C1 APC 0x9f) begin a captured
+            // string; the Kitty graphics protocol rides on APC.
+            (Escape, '\u{5f}') | (_, '\u{9f}') => {
                 self.state = SosPmApcString;
+                self.apc_capture = true;
+                self.apc_data.clear();
             }
 
-            (_, '\u{98}') | (_, '\u{9e}') | (_, '\u{9f}') => {
+            // SOS (ESC X / 0x98) and PM (ESC ^ / 0x9e) share the APC parser
+            // state but are not captured.
+            (Escape, '\u{58}') | (Escape, '\u{5e}') | (_, '\u{98}') | (_, '\u{9e}') => {
                 self.state = SosPmApcString;
+                self.apc_capture = false;
+            }
+
+            // Capture printable bytes of a captured APC string (Kitty graphics).
+            // Must precede the catch-all ignore arm below.
+            (SosPmApcString, '\u{20}'..='\u{7e}') if self.apc_capture => {
+                self.apc_data.push(input);
             }
 
             (_, '\u{9c}') => {
-                // 8-bit string terminator (ST), ending a DCS.
-                let sixel = self.unhook();
+                // 8-bit string terminator (ST), ending a DCS or APC string.
+                let captured = self.unhook();
                 self.state = Ground;
-                return sixel;
+                return captured;
             }
 
             (_, '\u{9d}') => {
@@ -680,6 +702,8 @@ impl Parser {
         self.intermediate = None;
         self.dcs_capture = false;
         self.dcs_data.clear();
+        self.apc_capture = false;
+        self.apc_data.clear();
     }
 
     fn collect(&mut self, input: char) {
@@ -858,15 +882,26 @@ impl Parser {
         }
     }
 
-    /// Finish a captured sixel DCS, emitting its data as a Function. Returns
-    /// None when the current/just-ended DCS was not a captured sixel.
+    /// Finish a captured DCS or APC string, emitting its data as a Function.
+    /// Returns None when nothing was captured (or a captured APC was not a
+    /// Kitty graphics command).
     fn unhook(&mut self) -> Option<Function> {
         if self.dcs_capture {
             self.dcs_capture = false;
-            Some(Function::Sixel(std::mem::take(&mut self.dcs_data)))
-        } else {
-            None
+            return Some(Function::Sixel(std::mem::take(&mut self.dcs_data)));
         }
+
+        if self.apc_capture {
+            self.apc_capture = false;
+            let data = std::mem::take(&mut self.apc_data);
+
+            // The Kitty graphics protocol prefixes its APC payload with `G`.
+            if let Some(rest) = data.strip_prefix('G') {
+                return Some(Function::KittyGraphics(rest.to_string()));
+            }
+        }
+
+        None
     }
 
     fn osc_put(&mut self, _input: char) {}
@@ -1231,9 +1266,10 @@ fn dump_function(seq: &mut String, fun: &Function) {
             );
         }
 
-        // Sixel images are not part of the serialized cell/cursor state, so the
-        // dump (used for state round-trips) does not re-emit them.
+        // Sixel and Kitty images are not part of the serialized cell/cursor
+        // state, so the dump (used for state round-trips) does not re-emit them.
         Sixel(_) => {}
+        KittyGraphics(_) => {}
     }
 }
 

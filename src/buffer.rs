@@ -83,6 +83,13 @@ impl Buffer {
         self.images.clear();
     }
 
+    /// Remove every image carrying the given Kitty graphics id. Used to replace
+    /// a prior placement before drawing the same id again, and for explicit
+    /// delete-by-id requests.
+    pub fn remove_images_by_id(&mut self, id: u32) {
+        self.images.retain(|i| i.id() != Some(id));
+    }
+
     /// Shift image anchors within a scroll region up by `n` rows, dropping any
     /// that scroll past the region's top.
     fn scroll_images_up(&mut self, range: &Range<usize>, n: usize) {
