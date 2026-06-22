@@ -21,14 +21,16 @@ use rgb::RGBA8;
 // legitimate terminal image.
 const MAX_PIXELS: usize = 16_000_000;
 
-/// The `a=` action of a Kitty graphics command. Anything unrecognized (and a
-/// continuation chunk's absent action) is treated as transmit-and-display.
+/// The `a=` action of a Kitty graphics command. An omitted `a` key defaults to
+/// transmit-only, matching the Kitty spec; continuation chunks (also keyless)
+/// inherit this but still route through accumulation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Action {
-    /// `a=T`: transmit and display. Also the default for headerless chunks.
-    #[default]
+    /// `a=T`: transmit and display.
     TransmitAndDisplay,
-    /// `a=t`: transmit only (store without displaying).
+    /// `a=t`: transmit only (store without displaying). The default when `a` is
+    /// omitted.
+    #[default]
     Transmit,
     /// `a=p`: place a previously transmitted image.
     Put,
@@ -253,10 +255,11 @@ mod tests {
     #[test]
     fn continuation_chunk_has_no_header_keys() {
         // A continuation chunk carries only `m` and the next slice of payload;
-        // the absent action defaults to transmit-and-display so it accumulates.
+        // the absent action defaults to transmit-only (the terminal still
+        // accumulates it onto the in-flight transfer).
         let cmd = parse_command("m=1;AAAA");
 
-        assert_eq!(cmd.action, Action::TransmitAndDisplay);
+        assert_eq!(cmd.action, Action::Transmit);
         assert!(cmd.more);
         assert_eq!(cmd.payload, "AAAA");
     }

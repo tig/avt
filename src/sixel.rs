@@ -104,6 +104,16 @@ impl Image {
         rows: usize,
         id: Option<u32>,
     ) -> Self {
+        // The Kitty `c`/`r` keys are attacker-controlled and independent of the
+        // raster's MAX_PIXELS cap, so a footprint that overflows or exceeds the
+        // cap is treated as unknown (no occlusion tracked) rather than
+        // allocating an enormous mask or letting later `occlude` calls index
+        // past an undersized one.
+        let (cols, rows) = match cols.checked_mul(rows) {
+            Some(area) if area <= MAX_PIXELS => (cols, rows),
+            _ => (0, 0),
+        };
+
         Image {
             col,
             row,

@@ -384,6 +384,20 @@ mod tests {
     }
 
     #[test]
+    fn kitty_oversized_footprint_is_not_tracked() {
+        // Huge c/r values (independent of the raster's pixel cap) must not
+        // overflow or allocate an enormous occlusion mask; the footprint falls
+        // back to untracked (0x0) while the image still places.
+        let mut vt = Vt::new(10, 3);
+        vt.feed_str("\u{1b}_Ga=T,f=32,s=1,v=1,c=4000000000,r=4000000000;/wAA/w==\u{1b}\\");
+
+        let images = vt.images();
+        assert_eq!(images.len(), 1);
+        assert_eq!((images[0].width(), images[0].height()), (1, 1));
+        assert_eq!((images[0].cols(), images[0].rows()), (0, 0));
+    }
+
+    #[test]
     fn non_graphics_apc_is_ignored() {
         let mut vt = Vt::new(10, 3);
         vt.feed_str("x");

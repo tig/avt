@@ -479,8 +479,23 @@ impl Terminal {
             }
         };
 
-        // A re-placement of the same id replaces its prior image.
+        // A re-placement of the same id replaces its prior image. Dirty the
+        // rows that placement occupied (an image paints from its anchor row
+        // down) so an incremental renderer repaints where the old image
+        // disappears, even when the new placement sits on a different row.
         if let Some(id) = transfer.id {
+            let old_rows: Vec<usize> = self
+                .buffer
+                .images()
+                .iter()
+                .filter(|i| i.id() == Some(id))
+                .map(|i| i.row)
+                .collect();
+
+            for old_row in old_rows {
+                self.dirty_lines.extend(old_row..self.rows);
+            }
+
             self.buffer.remove_images_by_id(id);
         }
 
