@@ -83,6 +83,13 @@ impl Buffer {
         self.images.clear();
     }
 
+    /// Remove every image carrying the given Kitty graphics id. Used to replace
+    /// a prior placement before drawing the same id again, and for explicit
+    /// delete-by-id requests.
+    pub fn remove_images_by_id(&mut self, id: u32) {
+        self.images.retain(|i| i.id() != Some(id));
+    }
+
     /// Shift image anchors within a scroll region up by `n` rows, dropping any
     /// that scroll past the region's top.
     fn scroll_images_up(&mut self, range: &Range<usize>, n: usize) {
@@ -138,7 +145,24 @@ impl Buffer {
     }
 
     pub fn print(&mut self, (col, row): VisualPosition, ch: char, pen: Pen) -> Option<usize> {
-        self[row].print(col, ch, pen)
+        let width = self[row].print(col, ch, pen);
+
+        // A cell written after an image was placed overwrites the sixel pixels
+        // there, the way a real terminal does; record that so the renderer can
+        // skip the occluded cells.
+        if let Some(w) = width {
+            for c in col..col + w {
+                self.occlude_images(c, row);
+            }
+        }
+
+        width
+    }
+
+    fn occlude_images(&mut self, col: usize, row: usize) {
+        for image in &mut self.images {
+            image.occlude(col, row);
+        }
     }
 
     pub fn wrap(&mut self, row: usize) {

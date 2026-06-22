@@ -51,9 +51,9 @@ impl Vt {
         self.terminal.view()
     }
 
-    /// The sixel images currently placed in the active buffer, anchored to view
-    /// cells. Pixels are decoded RGBA; the renderer composites them over the
-    /// text grid.
+    /// The sixel and Kitty graphics images currently placed in the active
+    /// buffer, anchored to view cells. Pixels are decoded RGBA; the renderer
+    /// composites them over the text grid.
     pub fn images(&self) -> &[crate::Image] {
         self.terminal.images()
     }
@@ -91,6 +91,7 @@ impl Vt {
 pub struct Builder {
     size: (usize, usize),
     scrollback_limit: Option<usize>,
+    cell_size: Option<(usize, usize)>,
 }
 
 impl Builder {
@@ -106,10 +107,20 @@ impl Builder {
         self
     }
 
+    /// The pixel size of a cell (width, height). When set, decoded sixel images
+    /// gain a cell footprint and track which cells later content overwrites, so
+    /// a renderer can occlude them like a real terminal does. Without it, images
+    /// carry no occlusion information.
+    pub fn cell_size(&mut self, width: usize, height: usize) -> &mut Self {
+        self.cell_size = Some((width, height));
+
+        self
+    }
+
     pub fn build(&self) -> Vt {
         Vt {
             parser: Parser::new(),
-            terminal: Terminal::new(self.size, self.scrollback_limit),
+            terminal: Terminal::new(self.size, self.scrollback_limit, self.cell_size),
         }
     }
 }
@@ -119,6 +130,7 @@ impl Default for Builder {
         Builder {
             size: (80, 24),
             scrollback_limit: None,
+            cell_size: None,
         }
     }
 }
@@ -216,6 +228,39 @@ mod tests {
     }
 
     #[test]
+    fn cell_written_over_image_after_placement_is_occluded() {
+        // cell_size 1x6 makes the two-column sixel span exactly two cells.
+        let mut vt = Vt::builder().size(10, 3).cell_size(1, 6).build();
+        // A two-column red sixel anchored at (0, 0): footprint 2x1 cells.
+        vt.feed_str("\u{1b}Pq#0;2;100;0;0~~\u{1b}\\");
+
+        let image = &vt.images()[0];
+        assert_eq!((image.cols(), image.rows()), (2, 1));
+        assert!(!image.is_occluded(0, 0));
+        assert!(!image.is_occluded(1, 0));
+
+        // Print a glyph over the image's second cell; it must occlude only that
+        // cell.
+        vt.feed_str("\u{1b}[1;2Hx");
+
+        let image = &vt.images()[0];
+        assert!(!image.is_occluded(0, 0), "untouched cell must still show");
+        assert!(image.is_occluded(1, 0), "overwritten cell must be occluded");
+    }
+
+    #[test]
+    fn images_track_no_occlusion_without_a_cell_size() {
+        // Without a cell size the footprint is unknown and nothing is tracked.
+        let mut vt = Vt::new(10, 3);
+        vt.feed_str("\u{1b}Pq#0;2;100;0;0~~\u{1b}\\");
+        vt.feed_str("\u{1b}[1;2Hx");
+
+        let image = &vt.images()[0];
+        assert_eq!((image.cols(), image.rows()), (0, 0));
+        assert!(!image.is_occluded(1, 0));
+    }
+
+    #[test]
     fn sixel_split_across_feeds_is_captured() {
         let mut vt = Vt::new(10, 3);
         vt.feed_str("\u{1b}Pq#0;2;100;0;0");
@@ -269,6 +314,112 @@ mod tests {
 
         vt.feed_str("\u{1b}[?1049l"); // back to primary
         assert_eq!(vt.images().len(), 1);
+    }
+
+    // A 2x1 RGBA Kitty image (red, blue) transmitted and displayed in one APC.
+    const KITTY_RB: &str = "\u{1b}_Ga=T,f=32,s=2,v=1,c=2,r=1;/wAA/wAA//8=\u{1b}\\";
+
+    #[test]
+    fn feed_kitty_places_image_at_cursor() {
+        let mut vt = Vt::new(10, 3);
+        vt.feed_str("ab");
+        vt.feed_str(KITTY_RB);
+
+        let images = vt.images();
+        assert_eq!(images.len(), 1);
+        // Anchored where the cursor sat (column 2, after "ab").
+        assert_eq!((images[0].col, images[0].row), (2, 0));
+        assert_eq!((images[0].width(), images[0].height()), (2, 1));
+        // Explicit cell footprint from c=2,r=1.
+        assert_eq!((images[0].cols(), images[0].rows()), (2, 1));
+
+        let px0 = images[0].pixels()[0];
+        assert_eq!((px0.r, px0.g, px0.b, px0.a), (255, 0, 0, 255));
+        let px1 = images[0].pixels()[1];
+        assert_eq!((px1.r, px1.g, px1.b, px1.a), (0, 0, 255, 255));
+
+        // The APC is invisible to the text grid.
+        assert_eq!(vt.text()[0].trim_end(), "ab");
+    }
+
+    #[test]
+    fn kitty_chunks_reassemble_into_one_image() {
+        let mut vt = Vt::new(10, 3);
+        // Header chunk with more data to follow (m=1): no image yet.
+        vt.feed_str("\u{1b}_Ga=T,f=32,s=2,v=1,c=2,r=1,m=1;/wAA/wAA\u{1b}\\");
+        assert!(vt.images().is_empty());
+
+        // Final chunk (m=0) carries the rest of the payload and finalizes.
+        vt.feed_str("\u{1b}_Gm=0;//8=\u{1b}\\");
+
+        let images = vt.images();
+        assert_eq!(images.len(), 1);
+        assert_eq!((images[0].width(), images[0].height()), (2, 1));
+        let px1 = images[0].pixels()[1];
+        assert_eq!((px1.r, px1.g, px1.b, px1.a), (0, 0, 255, 255));
+    }
+
+    #[test]
+    fn kitty_delete_by_id_removes_placement() {
+        let mut vt = Vt::new(10, 3);
+        vt.feed_str("\u{1b}_Ga=T,f=32,i=9,s=2,v=1,c=2,r=1;/wAA/wAA//8=\u{1b}\\");
+        assert_eq!(vt.images().len(), 1);
+        assert_eq!(vt.images()[0].id(), Some(9));
+
+        // Delete by id: a=d,d=i,i=9.
+        vt.feed_str("\u{1b}_Ga=d,d=i,i=9\u{1b}\\");
+        assert!(vt.images().is_empty());
+    }
+
+    #[test]
+    fn kitty_replacing_same_id_keeps_one_image() {
+        let mut vt = Vt::new(10, 3);
+        let img = "\u{1b}_Ga=T,f=32,i=3,s=2,v=1,c=2,r=1;/wAA/wAA//8=\u{1b}\\";
+        vt.feed_str(img);
+        vt.feed_str(img);
+
+        // Re-placing the same id replaces the prior image rather than stacking.
+        assert_eq!(vt.images().len(), 1);
+        assert_eq!(vt.images()[0].id(), Some(3));
+    }
+
+    #[test]
+    fn kitty_oversized_footprint_is_not_tracked() {
+        // Huge c/r values (independent of the raster's pixel cap) must not
+        // overflow or allocate an enormous occlusion mask; the footprint falls
+        // back to untracked (0x0) while the image still places.
+        let mut vt = Vt::new(10, 3);
+        vt.feed_str("\u{1b}_Ga=T,f=32,s=1,v=1,c=4000000000,r=4000000000;/wAA/w==\u{1b}\\");
+
+        let images = vt.images();
+        assert_eq!(images.len(), 1);
+        assert_eq!((images[0].width(), images[0].height()), (1, 1));
+        assert_eq!((images[0].cols(), images[0].rows()), (0, 0));
+    }
+
+    #[test]
+    fn non_graphics_apc_is_ignored() {
+        let mut vt = Vt::new(10, 3);
+        vt.feed_str("x");
+        // An APC that is not a Kitty graphics command (no `G` introducer).
+        vt.feed_str("\u{1b}_1337;notes\u{1b}\\");
+        vt.feed_str("y");
+
+        assert!(vt.images().is_empty());
+        assert_eq!(vt.text()[0].trim_end(), "xy");
+    }
+
+    #[test]
+    fn sos_string_is_ignored() {
+        let mut vt = Vt::new(10, 3);
+        vt.feed_str("x");
+        // An SOS string (ESC X ... ST) shares the APC parser state but must not
+        // be captured as graphics or disturb the text grid.
+        vt.feed_str("\u{1b}XGa=T,f=32,s=2,v=1,c=2,r=1;/wAA/wAA//8=\u{1b}\\");
+        vt.feed_str("y");
+
+        assert!(vt.images().is_empty());
+        assert_eq!(vt.text()[0].trim_end(), "xy");
     }
 
     #[test]
