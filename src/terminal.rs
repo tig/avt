@@ -45,6 +45,9 @@ pub struct Terminal {
     // The Kitty graphics transfer currently being reassembled across `m=1`
     // continuation chunks, or `None` between transfers.
     kitty_transfer: Option<KittyTransfer>,
+    // Transmitted Kitty images, keyed by image id, kept so a later `a=p`
+    // placement (which carries no payload) can look up and display them.
+    kitty_store: std::collections::HashMap<u32, crate::sixel::Sixel>,
 }
 
 /// A Kitty graphics image being reassembled: the first chunk's header keys plus
@@ -144,6 +147,7 @@ impl Terminal {
             xtwinops: false,
             cell_size,
             kitty_transfer: None,
+            kitty_store: std::collections::HashMap::new(),
         }
     }
 
@@ -402,13 +406,21 @@ impl Terminal {
                 if matches!(command.delete_target, Some('i') | Some('I')) {
                     if let Some(id) = command.id.filter(|&id| id != 0) {
                         self.buffer.remove_images_by_id(id);
+                        self.kitty_store.remove(&id);
                         self.dirty_lines.extend(0..self.rows);
                     }
                 }
             }
 
             // Query and any other action we don't implement are ignored.
-            Action::Query | Action::Other | Action::Put => {}
+            Action::Query | Action::Other => {}
+
+            // Place (`a=p`) displays a previously transmitted image (referenced
+            // by id), optionally cropped to a source rectangle. It carries no
+            // payload, so it does not accumulate.
+            Action::Put => {
+                self.kitty_put(command);
+            }
 
             // Transmit (`a=t`) and transmit-and-display (`a=T`), plus headerless
             // continuation chunks, accumulate into a transfer.
@@ -449,14 +461,10 @@ impl Terminal {
         }
     }
 
-    /// Decode a finished transfer and anchor it at the cursor. Transmit-only
-    /// (`a=t`) transfers are stored-without-display, which we don't support, so
-    /// they are dropped here.
+    /// Decode a finished transfer, store it by id (so a later `a=p` placement can
+    /// find it), and — unless it was transmit-only (`a=t`) — anchor it at the
+    /// cursor.
     fn kitty_place(&mut self, transfer: KittyTransfer) {
-        if transfer.transmit_only {
-            return;
-        }
-
         let Some(raster) = kitty::decode_raster(
             transfer.format,
             transfer.width,
@@ -465,6 +473,16 @@ impl Terminal {
         ) else {
             return;
         };
+
+        // Remember the image so a separate `a=p` placement can display it later.
+        if let Some(id) = transfer.id {
+            self.kitty_store.insert(id, raster.clone());
+        }
+
+        // `a=t` stores without displaying; the matching `a=p` will place it.
+        if transfer.transmit_only {
+            return;
+        }
 
         // Prefer the explicit cell footprint (`c`/`r`); otherwise derive it from
         // the renderer's cell pixel size, the same fallback sixel uses.
@@ -479,11 +497,57 @@ impl Terminal {
             }
         };
 
+        self.place_kitty_raster(raster, cols, rows, transfer.id);
+    }
+
+    /// Display a previously transmitted image (`a=p`), cropped to the command's
+    /// source rectangle (`x`/`y`/`w`/`h`) and anchored at the cursor. Unknown
+    /// ids and degenerate crops are ignored.
+    fn kitty_put(&mut self, command: kitty::Command) {
+        let Some(id) = command.id else {
+            return;
+        };
+
+        // Crop against the stored image (immutable borrow) before placing
+        // (mutable borrow); cloning out the cropped raster ends the borrow.
+        let cropped = match self.kitty_store.get(&id) {
+            Some(stored) => stored.crop(command.src_x, command.src_y, command.src_w, command.src_h),
+            None => return,
+        };
+
+        if cropped.width == 0 || cropped.height == 0 {
+            return;
+        }
+
+        let (cols, rows) = if command.cols > 0 && command.rows > 0 {
+            (command.cols, command.rows)
+        } else {
+            match self.cell_size {
+                Some((cw, ch)) if cw > 0 && ch > 0 => {
+                    (cropped.width.div_ceil(cw), cropped.height.div_ceil(ch))
+                }
+                _ => (0, 0),
+            }
+        };
+
+        self.place_kitty_raster(cropped, cols, rows, Some(id));
+    }
+
+    /// Anchor a decoded raster at the cursor with a `cols` x `rows` cell
+    /// footprint and an optional Kitty image id. Re-placing the same id replaces
+    /// the prior image and dirties the rows it occupied.
+    fn place_kitty_raster(
+        &mut self,
+        raster: crate::sixel::Sixel,
+        cols: usize,
+        rows: usize,
+        id: Option<u32>,
+    ) {
         // A re-placement of the same id replaces its prior image. Dirty the
         // rows that placement occupied (an image paints from its anchor row
         // down) so an incremental renderer repaints where the old image
         // disappears, even when the new placement sits on a different row.
-        if let Some(id) = transfer.id {
+        if let Some(id) = id {
             let old_rows: Vec<usize> = self
                 .buffer
                 .images()
@@ -505,7 +569,7 @@ impl Terminal {
             raster,
             cols,
             rows,
-            transfer.id,
+            id,
         );
 
         self.buffer.add_image(image);

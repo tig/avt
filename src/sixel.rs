@@ -25,11 +25,48 @@ const TRANSPARENT: RGBA8 = RGBA8::new(0, 0, 0, 0);
 const MAX_PIXELS: usize = 16_000_000;
 
 /// A decoded sixel image: a row-major, tightly packed RGBA pixel buffer.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Sixel {
     pub width: usize,
     pub height: usize,
     pub pixels: Vec<RGBA8>,
+}
+
+impl Sixel {
+    /// Extract a sub-rectangle (the Kitty `x`/`y`/`w`/`h` source crop). `w`/`h`
+    /// of `0` mean "extend to the right/bottom edge". The rectangle is clamped
+    /// to the image bounds; a degenerate result yields a 0x0 image.
+    pub(crate) fn crop(&self, x: usize, y: usize, w: usize, h: usize) -> Sixel {
+        let x = x.min(self.width);
+        let y = y.min(self.height);
+        let w = if w == 0 { self.width - x } else { w.min(self.width - x) };
+        let h = if h == 0 { self.height - y } else { h.min(self.height - y) };
+
+        if w == 0 || h == 0 {
+            return Sixel {
+                width: 0,
+                height: 0,
+                pixels: Vec::new(),
+            };
+        }
+
+        // Full-image crop (the common case for non-zoomed placements) is a clone.
+        if x == 0 && y == 0 && w == self.width && h == self.height {
+            return self.clone();
+        }
+
+        let mut pixels = Vec::with_capacity(w * h);
+        for row in y..y + h {
+            let start = row * self.width + x;
+            pixels.extend_from_slice(&self.pixels[start..start + w]);
+        }
+
+        Sixel {
+            width: w,
+            height: h,
+            pixels,
+        }
+    }
 }
 
 /// A decoded sixel image anchored to a terminal cell. The pixel data is shared

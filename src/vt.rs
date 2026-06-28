@@ -384,6 +384,41 @@ mod tests {
     }
 
     #[test]
+    fn kitty_transmit_only_then_put_places_image() {
+        let mut vt = Vt::new(10, 3);
+        // a=t transmits without displaying: stored by id, no image yet.
+        vt.feed_str("\u{1b}_Ga=t,f=32,i=7,s=2,v=1;/wAA/wAA//8=\u{1b}\\");
+        assert!(vt.images().is_empty());
+
+        // a=p displays the stored image at the cursor (after "ab" → column 2).
+        vt.feed_str("ab");
+        vt.feed_str("\u{1b}_Ga=p,i=7,c=2,r=1\u{1b}\\");
+
+        let images = vt.images();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].id(), Some(7));
+        assert_eq!((images[0].col, images[0].row), (2, 0));
+        assert_eq!((images[0].width(), images[0].height()), (2, 1));
+        let px1 = images[0].pixels()[1];
+        assert_eq!((px1.r, px1.g, px1.b, px1.a), (0, 0, 255, 255));
+    }
+
+    #[test]
+    fn kitty_put_applies_source_crop() {
+        let mut vt = Vt::new(10, 3);
+        // Transmit a 2x1 image (red, blue) without displaying.
+        vt.feed_str("\u{1b}_Ga=t,f=32,i=5,s=2,v=1;/wAA/wAA//8=\u{1b}\\");
+        // Place only the right 1px column (x=1,w=1): the blue pixel.
+        vt.feed_str("\u{1b}_Ga=p,i=5,x=1,y=0,w=1,h=1,c=1,r=1\u{1b}\\");
+
+        let images = vt.images();
+        assert_eq!(images.len(), 1);
+        assert_eq!((images[0].width(), images[0].height()), (1, 1));
+        let px = images[0].pixels()[0];
+        assert_eq!((px.r, px.g, px.b, px.a), (0, 0, 255, 255));
+    }
+
+    #[test]
     fn kitty_oversized_footprint_is_not_tracked() {
         // Huge c/r values (independent of the raster's pixel cap) must not
         // overflow or allocate an enormous occlusion mask; the footprint falls

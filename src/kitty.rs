@@ -59,6 +59,14 @@ pub(crate) struct Command {
     pub rows: usize,
     /// `i`: image id.
     pub id: Option<u32>,
+    /// `x`: source-rectangle left edge in pixels (`a=p` placement crop).
+    pub src_x: usize,
+    /// `y`: source-rectangle top edge in pixels.
+    pub src_y: usize,
+    /// `w`: source-rectangle width in pixels; `0` means to the right edge.
+    pub src_w: usize,
+    /// `h`: source-rectangle height in pixels; `0` means to the bottom edge.
+    pub src_h: usize,
     /// `m`: whether more chunks follow.
     pub more: bool,
     /// `d`: delete target (the character, e.g. `i`/`I`).
@@ -77,6 +85,10 @@ impl Default for Command {
             cols: 0,
             rows: 0,
             id: None,
+            src_x: 0,
+            src_y: 0,
+            src_w: 0,
+            src_h: 0,
             more: false,
             delete_target: None,
             payload: String::new(),
@@ -139,6 +151,26 @@ pub(crate) fn parse_command(rest: &str) -> Command {
             "i" => {
                 if let Ok(n) = v.parse() {
                     cmd.id = Some(n);
+                }
+            }
+            "x" => {
+                if let Ok(n) = v.parse() {
+                    cmd.src_x = n;
+                }
+            }
+            "y" => {
+                if let Ok(n) = v.parse() {
+                    cmd.src_y = n;
+                }
+            }
+            "w" => {
+                if let Ok(n) = v.parse() {
+                    cmd.src_w = n;
+                }
+            }
+            "h" => {
+                if let Ok(n) = v.parse() {
+                    cmd.src_h = n;
                 }
             }
             "m" => {
