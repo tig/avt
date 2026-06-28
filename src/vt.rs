@@ -249,6 +249,28 @@ mod tests {
     }
 
     #[test]
+    fn blank_space_does_not_occlude_but_solid_cell_does() {
+        let mut vt = Vt::builder().size(10, 3).cell_size(1, 6).build();
+        // A two-column red sixel anchored at (0, 0): footprint 2x1 cells.
+        vt.feed_str("\u{1b}Pq#0;2;100;0;0~~\u{1b}\\");
+
+        // A plain space (no background) is transparent: a below-text image shows
+        // through it, so it must NOT occlude.
+        vt.feed_str("\u{1b}[1;2H ");
+        assert!(
+            !vt.images()[0].is_occluded(1, 0),
+            "a blank space must not occlude the image"
+        );
+
+        // A space WITH a background paints the cell, so it occludes.
+        vt.feed_str("\u{1b}[41m\u{1b}[1;1H ");
+        assert!(
+            vt.images()[0].is_occluded(0, 0),
+            "a space with a background must occlude the image"
+        );
+    }
+
+    #[test]
     fn images_track_no_occlusion_without_a_cell_size() {
         // Without a cell size the footprint is unknown and nothing is tracked.
         let mut vt = Vt::new(10, 3);

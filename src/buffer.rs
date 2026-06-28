@@ -147,12 +147,19 @@ impl Buffer {
     pub fn print(&mut self, (col, row): VisualPosition, ch: char, pen: Pen) -> Option<usize> {
         let width = self[row].print(col, ch, pen);
 
-        // A cell written after an image was placed overwrites the sixel pixels
-        // there, the way a real terminal does; record that so the renderer can
-        // skip the occluded cells.
+        // A cell written after an image was placed overwrites the pixels there,
+        // the way a real terminal does; record that so the renderer can skip the
+        // occluded cells. Only a *solid* cell occludes, though: a blank cell — a
+        // space with no background — paints nothing, so a below-text image shows
+        // through it (e.g. Terminal.Gui's ImageView redraws transparent spaces
+        // over its `z=-1` raster preview). Occluding on blank spaces would hide
+        // such an image even though a real terminal keeps it visible.
         if let Some(w) = width {
-            for c in col..col + w {
-                self.occlude_images(c, row);
+            let solid = ch != ' ' || pen.background().is_some();
+            if solid {
+                for c in col..col + w {
+                    self.occlude_images(c, row);
+                }
             }
         }
 
